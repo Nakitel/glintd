@@ -81,6 +81,30 @@ if [ -n "$need_pkg" ]; then
     fi
 fi
 
+# Best-effort: install `coreutils-base64` if the firmware's busybox
+# doesn't ship a `base64` applet. The daemon itself doesn't need
+# this - it's purely a speed-up for the Glint iOS/Mac companion's
+# SMS-polling path, which SSHes in and base64-encodes every file
+# under /etc/spool/sms/{incoming,storage}/. On busybox without
+# coreutils-base64, the fallback is `openssl base64` - one fork
+# per SMS file, ~150 ms each on ARM. A Mudi 7 with 66 SMS burned
+# ~10 s of router CPU per scan (load avg climbed past 4 before
+# the read-side throttle on the companion side capped the cadence).
+# With this package present, `base64` is a single ~1 ms fork.
+#
+# Best-effort because:
+#   - Functionality is unaffected if it doesn't install - the
+#     companion just runs slower on first scan, then the 30 s
+#     throttle on the client side keeps things from snowballing.
+#   - Some downstream-only firmware variants may not have it in
+#     their feed; we don't want one stale opkg URL to abort the
+#     whole install on an otherwise-working router.
+if ! command -v base64 >/dev/null 2>&1; then
+    log "installing coreutils-base64 (best-effort, speeds up Glint SMS scan)"
+    opkg install coreutils-base64 >>"$LOG" 2>&1 \
+        || log "coreutils-base64 install failed - companion SMS scan will use the slower openssl fallback (still functional)"
+fi
+
 # 2. Lay out the source tree under /etc/glintd. Source location
 #    depends on caller - `curl | sh` mode pulls the tarball from
 #    glint.nakitel.com first; manual mode finds the files we

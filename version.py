@@ -17,4 +17,4 @@ integers; don't introduce build suffixes (`0.2.0+abc`) or
 pre-releases (`0.2.0-rc1`) without updating the comparator on
 the app side.
 """
-VERSION = "0.5.6"
+VERSION = "0.5.7"
