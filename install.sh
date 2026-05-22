@@ -315,7 +315,7 @@ cat > /usr/libexec/rpcd/mudi.glintd <<EOF
 #!/bin/sh
 case "\$1" in
     list)
-        echo '{"ping":{},"get_history":{"metric":"str","since":0,"tier":"str"},"list_metrics":{},"register_device_token":{"token":"str","platform":"str","bundle_id":"str","disabled_events":[]},"unregister_device_token":{"token":"str"},"set_push_preferences":{"token":"str","disabled_events":[]},"get_router_credentials":{},"test_push":{"title":"str","body":"str"}}'
+        echo '{"ping":{},"get_history":{"metric":"str","since":0,"tier":"str"},"list_metrics":{},"get_internet_history":{"since":0,"until":0,"limit":0},"get_snapshot":{"metrics":[]},"register_device_token":{"token":"str","platform":"str","bundle_id":"str","disabled_events":[]},"unregister_device_token":{"token":"str"},"set_push_preferences":{"token":"str","disabled_events":[]},"get_router_credentials":{},"test_push":{"title":"str","body":"str"}}'
     ;;
     call)
         read input
@@ -346,6 +346,7 @@ LATEST_URL="https://glint.nakitel.com/glintd/version.txt"
 TARBALL_URL="https://glint.nakitel.com/glintd/glintd.tar.gz"
 SIG_URL="https://glint.nakitel.com/glintd/glintd.tar.gz.sig"
 INSTALL_URL="https://glint.nakitel.com/glintd/install.sh"
+INSTALL_SIG_URL="https://glint.nakitel.com/glintd/install.sh.sig"
 RELEASE_PUB_URL="https://glint.nakitel.com/glintd/release.pub"
 RELEASE_PUB_SIG_URL="https://glint.nakitel.com/glintd/release.pub.sig"
 
@@ -369,7 +370,8 @@ NEWER=$(printf '%s\n%s\n' "$INSTALLED" "$LATEST" \
 logger -t glintd "self-update: $INSTALLED -> $LATEST, fetching"
 TMP=$(mktemp -d /tmp/glintd-self-update.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
-if ! curl -fsSL --max-time 60 -o "$TMP/install.sh" "$INSTALL_URL" \
+if ! curl -fsSL --max-time 60 -o "$TMP/install.sh" "$INSTALL_URL?v=$LATEST" \
+   || ! curl -fsSL --max-time 30 -o "$TMP/install.sh.sig" "$INSTALL_SIG_URL?v=$LATEST" \
    || ! curl -fsSL --max-time 60 -o "$TMP/glintd.tar.gz" "$TARBALL_URL?v=$LATEST" \
    || ! curl -fsSL --max-time 30 -o "$TMP/glintd.tar.gz.sig" "$SIG_URL?v=$LATEST" \
    || ! curl -fsSL --max-time 30 -o "$TMP/release.pub" "$RELEASE_PUB_URL" \
@@ -400,6 +402,21 @@ if ! usign -V -m "$TMP/glintd.tar.gz" \
         -p "$TMP/release.pub" \
         -x "$TMP/glintd.tar.gz.sig" >/dev/null 2>&1; then
     logger -t glintd "self-update: tarball signature verification FAILED - aborting"
+    exit 0
+fi
+# Verify install.sh ITSELF before running it. Without this the
+# signed-tarball design is undermined: we'd be executing a freshly
+# downloaded, unauthenticated shell script as root and trusting it
+# to verify everything else. A compromised CDN/origin or a
+# mis-issued TLS cert could swap install.sh for a payload that
+# ignores the signature checks entirely. The script is signed with
+# the same release key as the tarball and chains to the embedded
+# offline root, so a forged install.sh fails here and we abort with
+# the previous version still installed and running.
+if ! usign -V -m "$TMP/install.sh" \
+        -p "$TMP/release.pub" \
+        -x "$TMP/install.sh.sig" >/dev/null 2>&1; then
+    logger -t glintd "self-update: install.sh signature verification FAILED - aborting (suspected MITM / CDN compromise)"
     exit 0
 fi
 

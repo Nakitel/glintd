@@ -36,6 +36,17 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         with open(schema_path) as f:
             self.conn.executescript(f.read())
+        # The DB lives on tmpfs (/tmp), so the WAL is RAM too. The
+        # default autocheckpoint (1000 pages ≈ 4 MB) let the WAL grow
+        # larger than the main DB itself (observed 4.3 MB WAL vs 3 MB
+        # DB), doubling the daemon's RAM footprint for the same data.
+        # Checkpoint more eagerly - 256 pages ≈ 1 MB - to fold the WAL
+        # back into the main file. `journal_size_limit` then truncates
+        # the WAL file back down after each checkpoint (without it the
+        # file stays allocated at its high-water mark and the RAM is
+        # never reclaimed). Negligible cost on tmpfs (no real fsync).
+        self.conn.execute("PRAGMA wal_autocheckpoint=256")
+        self.conn.execute("PRAGMA journal_size_limit=1048576")
         # Idempotent column adds for tables that pre-date this
         # field. Older `push_tokens` rows lack `disabled_events`;
         # ALTER TABLE ADD COLUMN is the canonical sqlite migration.
@@ -193,6 +204,21 @@ class Store:
                  "min": r["min_v"],
                  "avg": r["avg_v"],
                  "max": r["max_v"]} for r in cur]
+
+    def latest_per_metric(self) -> dict[str, tuple[int, float]]:
+        """Return the most recent (ts, value) for every metric the
+        daemon has hot data for. One query, indexed by the
+        (metric, ts) primary key - the engine resolves it as a
+        per-group MAX in one scan. Powers `get_snapshot` so the
+        app can populate every chart's "current" reading from
+        a single round-trip instead of N per-metric calls.
+        """
+        cur = self.conn.execute(
+            "SELECT metric, ts, value FROM samples_hot "
+            "WHERE (metric, ts) IN "
+            "  (SELECT metric, MAX(ts) FROM samples_hot GROUP BY metric)"
+        )
+        return {r["metric"]: (int(r["ts"]), float(r["value"])) for r in cur}
 
     def list_metrics(self) -> list[str]:
         """Distinct metric names that have any data right now.

@@ -28,6 +28,8 @@ HANDLERS = {
     "ping":                   ping.handle,
     "get_history":            history.handle,
     "list_metrics":           history.list_metrics_handle,
+    "get_internet_history":   history.internet_history_handle,
+    "get_snapshot":           history.snapshot_handle,
     "register_device_token":  tokens.register_handle,
     "unregister_device_token": tokens.unregister_handle,
     "set_push_preferences":   tokens.set_preferences_handle,

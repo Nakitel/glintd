@@ -9,7 +9,7 @@ from glintd.rpc.context import open_store
 # Single source of truth lives in glintd.version; the app reads
 # the same string back out of `ping`'s reply to compare against
 # the published `glint.nakitel.com/glintd/version.txt`.
-from glintd.version import VERSION
+from glintd.version import VERSION, FEATURES
 
 
 def handle(args: dict[str, Any]) -> dict[str, Any]:
@@ -38,4 +38,9 @@ def handle(args: dict[str, Any]) -> dict[str, Any]:
         "uptime_s": uptime_s,
         "router_id": router_id,
         "capabilities": json.loads(caps_json),
+        # Protocol-level features (vs. the `capabilities` block above
+        # which describes hardware). The app reads this map to decide
+        # which v2 endpoints are safe to call against this daemon.
+        # See docs/glintd-protocol.md for the contract.
+        "features": FEATURES,
     }

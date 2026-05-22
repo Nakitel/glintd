@@ -1,4 +1,5 @@
-"""Always-available system metrics: load average, memory, CPU temp.
+"""Always-available system metrics: load average, memory, CPU temp,
+flash usage.
 
 `/proc/loadavg` and `/proc/meminfo` are kernel-side, so they exist
 on every router we'd ever deploy to. CPU temp varies - we use the
@@ -7,6 +8,8 @@ sysfs path the capability probe found at startup, falling back to
 but seen on some Wi-Fi-only models).
 """
 from __future__ import annotations
+
+import os
 
 NAME = "system"
 INTERVAL_SEC = 15
@@ -55,5 +58,21 @@ def collect(caps) -> dict[str, float]:
             out["sys.cpu_temp_c"] = raw / 1000.0
         except (OSError, ValueError):
             pass
+
+    # Flash / root-overlay usage. Mirrors the app's live `df -kP /`
+    # reading (used / total %). Stored as history so the Flash
+    # strip in the router-detail card backfills after an app
+    # restart instead of showing an overnight gap - the app used
+    # to populate it only from live ticks, so anything older than
+    # the current session was a blank strip. statvfs is a single
+    # cheap syscall; safe at the 15 s collector cadence. `used`
+    # excludes free blocks the same way `df` reports it.
+    try:
+        st = os.statvfs("/")
+        if st.f_blocks > 0:
+            used = st.f_blocks - st.f_bfree
+            out["sys.flash_pct"] = used / st.f_blocks * 100.0
+    except OSError:
+        pass
 
     return out
