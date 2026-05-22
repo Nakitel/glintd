@@ -4,9 +4,9 @@
 chain. This document describes how the chain works and how to
 rotate keys when needed.
 
-For the surrounding day-to-day release / deploy / troubleshoot
-procedures see [`../../docs/glintd-operations.md`](../../docs/glintd-operations.md).
-This file focuses on the rotation primitive in isolation.
+This document focuses on the key-rotation primitive in isolation;
+the surrounding day-to-day release and deploy procedures are kept
+separately by the operator.
 
 ## Roles
 

@@ -17,7 +17,7 @@ integers; don't introduce build suffixes (`0.2.0+abc`) or
 pre-releases (`0.2.0-rc1`) without updating the comparator on
 the app side.
 """
-VERSION = "0.6.4"
+VERSION = "1.0.0"
 
 # Protocol features this daemon implements. Returned in the
 # ping reply under "features" so the app can branch on what is
