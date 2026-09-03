@@ -19,6 +19,7 @@ clients split on '\\n'.
 from __future__ import annotations
 import json
 import os
+import signal
 import sys
 import time
 from glintd.rpc.server import dispatch
@@ -57,6 +58,37 @@ def main():
     print(json.dumps(result, separators=(",", ":")))
 
 
+def _reap_stale_streams() -> None:
+    """Kill any other `stream_snapshots` CLI processes before this
+    one starts. Only one live snapshot stream per router is ever
+    useful - the app keeps a single consumer. Stale ones pile up
+    because an SSH exec channel isn't always torn down on the client
+    side: dropbear keeps the abandoned reader's channel open, so the
+    writer never sees BrokenPipe and lingers (observed 8 python procs
+    at ~27 MB RSS each holding ~190 MB). Enforcing "one stream" here
+    makes the leak self-correcting - each fresh stream the app opens
+    reaps the orphaned ones. Best-effort: any /proc race just skips
+    that pid."""
+    me = os.getpid()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return
+    for pid in pids:
+        if int(pid) == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "ignore")
+        except OSError:
+            continue
+        if "glintd.rpc.cli" in cmd and "stream_snapshots" in cmd:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+
+
 def _run_stream(args: dict) -> None:
     """Stream snapshot deltas as newline-separated JSON until
     stdout closes. Format per line:
@@ -71,6 +103,7 @@ def _run_stream(args: dict) -> None:
     stdout is flushed immediately - the SSH pipe is line-buffered
     by default on busybox.
     """
+    _reap_stale_streams()
     store = open_store()
     last_signature: tuple = ()
     last_emit = 0.0

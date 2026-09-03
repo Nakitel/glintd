@@ -60,7 +60,12 @@ CREATE TABLE IF NOT EXISTS push_tokens (
     -- "battery.low,sim.switched"). NULL/empty = receive all.
     -- Updated via set_push_preferences without re-registering
     -- the token.
-    disabled_events TEXT
+    disabled_events TEXT,
+    -- APNs environment this token belongs to: "production" /
+    -- "development". NULL is treated as "production" by every
+    -- reader (COALESCE). store.py also ADD COLUMNs this for DBs
+    -- created before the column existed.
+    environment TEXT
 );
 
 -- Existing-installs migration: adds the column if the table was

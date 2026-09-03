@@ -21,6 +21,16 @@ LOG="/tmp/glintd-install.log"
 log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+# procd's own liveness check is the authority when the init
+# script exposes it (`running` comes from procd.sh, not every
+# vendor build keeps it), so fall back to looking for the
+# process. Guessing "not running" is the safe direction: a
+# redundant `start` on a live procd service is a no-op.
+rpcd_running() {
+    /etc/init.d/rpcd running >/dev/null 2>&1 && return 0
+    pgrep rpcd >/dev/null 2>&1
+}
+
 log "glintd installer starting"
 
 # 1. Sanity - we need python3 and sqlite3. opkg ships -light
@@ -258,6 +268,20 @@ START=99
 STOP=10
 
 start_service() {
+    # rpcd is what publishes our ubus object, and some firmwares
+    # ship it disabled (GL.iNet 4.10 on the E5800 / Mudi 7 -
+    # their web UI talks to ubus directly, so nothing else on the
+    # box needs rpcd). It also gets switched back off by a
+    # "keep settings" firmware upgrade, which wipes the overlay's
+    # opkg state. Without this the daemon boots perfectly and the
+    # app still sees no router daemon at all, so re-assert it on
+    # every start. Both calls are no-ops when rpcd is already
+    # enabled and up.
+    /etc/init.d/rpcd enabled 2>/dev/null || \
+        /etc/init.d/rpcd enable >/dev/null 2>&1 || true
+    /etc/init.d/rpcd running >/dev/null 2>&1 || \
+        /etc/init.d/rpcd start >/dev/null 2>&1 || true
+
     procd_open_instance
     procd_set_param command python3 $GLINTD_HOME/daemon.py
     procd_set_param env PYTHONPATH=/etc
@@ -445,10 +469,54 @@ echo "$CRON_LINE" >> /etc/crontabs/root
 /etc/init.d/cron reload >/dev/null 2>&1 || \
     /etc/init.d/cron restart >/dev/null 2>&1 || true
 
+# 7b. Survive firmware upgrades. GL.iNet's sysupgrade reads
+#     /lib/upgrade/keep.d/* BEFORE replacing the rootfs+overlay, to
+#     build the "keep settings" backup set. glintd's code lives in the
+#     overlay and is wiped wholesale on every firmware update, but
+#     listing the credential + history files here makes them survive a
+#     "Keep settings" upgrade - so a post-upgrade reinstall (via the
+#     companion app's auto-reinstall, or this script run again) keeps
+#     the relay's TOFU identity and the metric history intact. The
+#     keep.d file itself is wiped too, but it has already been read by
+#     the time that happens, so it does its job for the upgrade in
+#     progress and this installer re-creates it afterwards.
+mkdir -p /lib/upgrade/keep.d
+cat > /lib/upgrade/keep.d/glintd <<'EOF'
+/etc/glintd/router_id
+/etc/glintd/router_secret
+/etc/glintd/state.db
+EOF
+
 # 8. Enable + start.
 "$INIT_SCRIPT" enable
 "$INIT_SCRIPT" start
-/etc/init.d/rpcd reload >/dev/null 2>&1 || true
+
+# 8b. Make sure rpcd is actually up. It - not the daemon - is what
+#     publishes `mudi.glintd` on ubus: it scans /usr/libexec/rpcd
+#     at startup, re-scans on SIGHUP, and forks the shim for every
+#     call the app makes. GL.iNet 4.10 firmware (GL-E5800 / Mudi 7
+#     and siblings) ships rpcd NEITHER enabled NOR running, since
+#     their own web UI speaks to ubus directly. Against that box
+#     the bare `reload` this step used to send was a no-op - procd
+#     only signals a live instance - so the object never appeared
+#     and the install failed its smoke test below with a perfectly
+#     healthy daemon running. Reported from the field on
+#     e5800-4.10.0_release5 and reproduced on the 4.10.0 test unit.
+if [ ! -x /etc/init.d/rpcd ]; then
+    die "rpcd is not installed on this firmware - Glint needs it to publish 'mudi.glintd' on ubus. Run \`opkg update && opkg install rpcd\` on the router, then re-run this installer."
+fi
+if ! /etc/init.d/rpcd enabled 2>/dev/null; then
+    log "rpcd was not enabled at boot - enabling it"
+    /etc/init.d/rpcd enable >>"$LOG" 2>&1 \
+        || log "WARNING: couldn't enable rpcd - glintd's ubus object won't come back after a reboot"
+fi
+if rpcd_running; then
+    /etc/init.d/rpcd reload >>"$LOG" 2>&1 || true
+else
+    log "rpcd was not running (stock state on GL.iNet 4.10) - starting it"
+    /etc/init.d/rpcd start >>"$LOG" 2>&1 \
+        || log "WARNING: /etc/init.d/rpcd start failed - see 'logread | grep rpcd'"
+fi
 
 # 9. Smoke test - give the daemon up to 10 s to come up, then
 #    verify ubus answers `ping`. busybox `sleep` on some boards
@@ -466,4 +534,30 @@ while [ $i -lt 10 ]; do
     sleep 1
     i=$((i + 1))
 done
+
+# Ping never answered. Work out WHICH half is broken before we
+# give up, and put the evidence in the log: with rpcd down the
+# daemon answers its CLI perfectly and only the bus is silent,
+# and that distinction is the difference between a one-line fix
+# and a support round-trip.
+{
+    echo "--- diagnostics ---"
+    echo '$ /etc/init.d/glintd status'
+    "$INIT_SCRIPT" status 2>&1 || true
+    echo '$ /etc/init.d/rpcd running'
+    /etc/init.d/rpcd running 2>&1 || echo "(not running)"
+    echo '$ ubus list'
+    ubus list 2>&1 || true
+    echo '$ glintd-rpc.sh ping'
+    "$GLINTD_HOME/glintd-rpc.sh" ping 2>&1 | head -5 || true
+    echo '$ logread | grep -iE "glintd|rpcd" | tail -30'
+    logread 2>/dev/null | grep -iE 'glintd|rpcd' | tail -30 || true
+} >>"$LOG" 2>&1 || true
+
+if ! rpcd_running; then
+    die "rpcd won't stay running on this firmware, so 'mudi.glintd' can't be published on ubus - the daemon itself may be fine. Try \`/etc/init.d/rpcd enable && /etc/init.d/rpcd start\`, check \`logread | grep rpcd\`, then re-run this installer. Details in $LOG."
+fi
+if "$GLINTD_HOME/glintd-rpc.sh" ping >/dev/null 2>&1; then
+    die "the daemon answers directly but rpcd didn't publish 'mudi.glintd' on ubus. Check \`logread | grep rpcd\` and that /usr/libexec/rpcd/mudi.glintd is executable. Details in $LOG."
+fi
 die "daemon didn't answer ubus ping within 10s - see $LOG and 'logread | grep glintd'"

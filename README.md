@@ -41,9 +41,29 @@ ssh root@<router> 'sh /tmp/glintd-bundle/install.sh'
   `/usr/libexec/rpcd/mudi.glintd` and ACL at
   `/usr/share/rpcd/acl.d/glintd.json`
 - enable + start the service
+- enable + start `rpcd` if the firmware left it off (see below)
 - verify `ubus call mudi.glintd ping` answers within 3 s
 
 Re-running it upgrades in place.
+
+### rpcd has to be running
+
+`rpcd` is what publishes `mudi.glintd` on ubus: it scans
+`/usr/libexec/rpcd/` at startup, re-scans on SIGHUP, and forks the
+shim for every call the app makes. Some firmwares ship it neither
+enabled nor running - GL.iNet 4.10 on the E5800 / Mudi 7 among
+them, because their web UI talks to ubus directly. On such a box
+the daemon runs fine while `ubus call mudi.glintd ping` answers
+`Not found`, and the install reports "daemon didn't answer ubus
+ping".
+
+Since 1.0.4 `install.sh` handles that itself, and the init script
+re-asserts it on every start (a "keep settings" firmware upgrade
+switches rpcd back off). By hand:
+
+```sh
+/etc/init.d/rpcd enable && /etc/init.d/rpcd start
+```
 
 ## Layout
 

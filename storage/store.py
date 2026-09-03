@@ -15,6 +15,7 @@ avg, max) over the five 1 m warm rows it covers. Min/max preserve
 spike events that a pure mean would smooth out.
 """
 from __future__ import annotations
+import math
 import os
 import sqlite3
 import time
@@ -47,10 +48,16 @@ class Store:
         # never reclaimed). Negligible cost on tmpfs (no real fsync).
         self.conn.execute("PRAGMA wal_autocheckpoint=256")
         self.conn.execute("PRAGMA journal_size_limit=1048576")
-        # Idempotent column adds for tables that pre-date this
-        # field. Older `push_tokens` rows lack `disabled_events`;
-        # ALTER TABLE ADD COLUMN is the canonical sqlite migration.
+        # Idempotent column adds for tables that pre-date these
+        # fields. Older `push_tokens` rows lack `disabled_events` /
+        # `environment`; ALTER TABLE ADD COLUMN is the canonical
+        # sqlite migration. `environment` shipped in the code paths
+        # (register/heartbeat/shutdown) from 0.5.7 but was never
+        # added to the schema or migrated, so every daemon was
+        # logging `no such column: environment` each cycle until
+        # this line landed.
         self._add_column_if_missing("push_tokens", "disabled_events", "TEXT")
+        self._add_column_if_missing("push_tokens", "environment", "TEXT")
 
     def _add_column_if_missing(self, table: str, column: str,
                                type_decl: str) -> None:
@@ -78,7 +85,26 @@ class Store:
             return
         if ts is None:
             ts = int(time.time())
-        rows = [(name, ts, float(v)) for name, v in samples.items()]
+        # Drop non-finite values at the door. A collector occasionally
+        # emits NaN/inf (e.g. battery probe `float("nan")` when the mcu
+        # returns a JSON `NaN` token, or a divide-by-zero edge). SQLite
+        # has no NaN: a stored NaN reads back inconsistently (IS NULL is
+        # false but AVG() folds it to NULL), so a single NaN sample
+        # poisons the warm aggregate, makes the warm->cool rollup hit
+        # `NOT NULL samples_cool.avg_v`, and - because the rollup throws
+        # before trim - freezes tier trimming entirely (tables then grow
+        # unbounded). Keeping the bad value out of the hot tier is the
+        # root-cause fix; `roll()` decoupling below is the safety net.
+        rows = []
+        for name, v in samples.items():
+            fv = float(v)
+            if math.isfinite(fv):
+                rows.append((name, ts, fv))
+            else:
+                print(f"[glintd] dropped non-finite sample "
+                      f"{name}={v!r}", flush=True)
+        if not rows:
+            return
         self.conn.executemany(
             "INSERT OR REPLACE INTO samples_hot(metric, ts, value) "
             "VALUES (?, ?, ?)",
@@ -93,35 +119,50 @@ class Store:
         same minute produces the same end state because the
         target tables use INSERT OR REPLACE on (metric, ts)."""
         now = int(time.time())
-        # Hot → warm. We aggregate hot rows that are at least
-        # `WARM_RES_S` old (i.e. their warm bucket is closed and
-        # can't receive more samples).
-        warm_cutoff = ((now - WARM_RES_S) // WARM_RES_S) * WARM_RES_S
-        self.conn.execute(f"""
-            INSERT OR REPLACE INTO samples_warm(metric, ts, min_v, avg_v, max_v)
-            SELECT metric,
-                   (ts / {WARM_RES_S}) * {WARM_RES_S} AS bucket_ts,
-                   MIN(value), AVG(value), MAX(value)
-            FROM samples_hot
-            WHERE ts < ?
-            GROUP BY metric, bucket_ts
-        """, (warm_cutoff,))
+        # Promote is decoupled from trim. A poisoned aggregate (a NULL
+        # AVG from a residual NaN row left by an older daemon) used to
+        # throw here and skip trim, so the tiers grew without bound and
+        # the rollup never recovered. Now: (1) `HAVING AVG(...) IS NOT
+        # NULL` drops any group that would violate the NOT NULL target,
+        # (2) promote runs in its own try, and (3) trim ALWAYS runs.
+        # Even if a row somehow still poisons promote, trim keeps the
+        # hot/warm tiers bounded so the bad data ages out within the
+        # retention window instead of wedging forever.
+        try:
+            # Hot → warm. Aggregate hot rows at least `WARM_RES_S` old
+            # (their warm bucket is closed and can't receive more).
+            warm_cutoff = ((now - WARM_RES_S) // WARM_RES_S) * WARM_RES_S
+            self.conn.execute(f"""
+                INSERT OR REPLACE INTO samples_warm(metric, ts, min_v, avg_v, max_v)
+                SELECT metric,
+                       (ts / {WARM_RES_S}) * {WARM_RES_S} AS bucket_ts,
+                       MIN(value), AVG(value), MAX(value)
+                FROM samples_hot
+                WHERE ts < ?
+                GROUP BY metric, bucket_ts
+                HAVING AVG(value) IS NOT NULL
+            """, (warm_cutoff,))
 
-        # Warm → cool.
-        cool_cutoff = ((now - COOL_RES_S) // COOL_RES_S) * COOL_RES_S
-        self.conn.execute(f"""
-            INSERT OR REPLACE INTO samples_cool(metric, ts, min_v, avg_v, max_v)
-            SELECT metric,
-                   (ts / {COOL_RES_S}) * {COOL_RES_S} AS bucket_ts,
-                   MIN(min_v), AVG(avg_v), MAX(max_v)
-            FROM samples_warm
-            WHERE ts < ?
-            GROUP BY metric, bucket_ts
-        """, (cool_cutoff,))
+            # Warm → cool.
+            cool_cutoff = ((now - COOL_RES_S) // COOL_RES_S) * COOL_RES_S
+            self.conn.execute(f"""
+                INSERT OR REPLACE INTO samples_cool(metric, ts, min_v, avg_v, max_v)
+                SELECT metric,
+                       (ts / {COOL_RES_S}) * {COOL_RES_S} AS bucket_ts,
+                       MIN(min_v), AVG(avg_v), MAX(max_v)
+                FROM samples_warm
+                WHERE ts < ?
+                GROUP BY metric, bucket_ts
+                HAVING AVG(avg_v) IS NOT NULL
+            """, (cool_cutoff,))
+        except Exception as e:
+            print(f"[glintd] roll promote failed (trim still runs): {e}",
+                  flush=True)
 
-        # Trim expired rows. We keep one bucket past the retention
-        # window so the app's "request last N seconds" queries
-        # never see the boundary tear off a fresh sample.
+        # Trim expired rows - ALWAYS, even if promote failed above. We
+        # keep one bucket past the retention window so the app's
+        # "request last N seconds" queries never see the boundary tear
+        # off a fresh sample.
         self.conn.execute(
             "DELETE FROM samples_hot  WHERE ts < ?", (now - HOT_KEEP_S,))
         self.conn.execute(
