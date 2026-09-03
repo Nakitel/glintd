@@ -144,14 +144,14 @@ includes `/etc`. The wrapper script sets that up.)
 
 Output is newline-delimited JSON. Each line is one of:
 
-- **Snapshot delta** — emitted whenever any metric's latest ts
+- **Snapshot delta** - emitted whenever any metric's latest ts
   moves forward. Same shape as `get_snapshot`'s reply, with
   the full set of metrics' latest values:
   ```json
   {"ts": 1730000000,
    "samples": {"battery.pct": {"ts": 1730000000, "value": 92.0}, ...}}
   ```
-- **Heartbeat** — emitted every 30 s when no metric changed,
+- **Heartbeat** - emitted every 30 s when no metric changed,
   so the client can detect a dead stream vs an idle router:
   ```json
   {"heartbeat": 1730000030}

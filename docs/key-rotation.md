@@ -14,7 +14,7 @@ separately by the operator.
 |----------------|------------------------------------------|---------------------------------------------|------------------|
 | `root.sec`     | offline (1Password / hardware token)     | signing the release public key              | once per decade  |
 | `root.pub`     | embedded in `install.sh`                 | the only key the router fundamentally trusts| never            |
-| `release.sec`  | dev machine (`~/.glint-signing/`)        | signing each release tarball                | on compromise    |
+| `release.sec`  | operator's private signing directory     | signing each release tarball                | on compromise    |
 | `release.pub`  | published at `glint.nakitel.com/glintd/` | verifying tarballs                          | with rotation    |
 | `release.pub.sig` | published next to `release.pub`       | proves release.pub chains to root           | with rotation    |
 
@@ -40,8 +40,9 @@ Trigger: `release.sec` is suspected leaked, exposed in a backup,
 copied off the dev machine, or sat on a compromised system.
 
 ```bash
-# 1. Generate a new release keypair.
-cd ~/.glint-signing
+# 1. Generate a new release keypair. $SIGNING_DIR is wherever the
+#    operator keeps the release keypair - it never leaves that box.
+cd "$SIGNING_DIR"
 mv release.sec release.sec.OLD-$(date +%Y%m%d)
 mv release.pub release.pub.OLD-$(date +%Y%m%d)
 signify -G -n -p release.pub -s release.sec \

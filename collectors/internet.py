@@ -104,7 +104,7 @@ def _detect_active_kind(caps) -> str:
         if slot in (1, 2):
             _last_cellular_slot = slot
         elif _last_cellular_slot in (1, 2):
-            # Slot momentarily unresolvable — during a reconnect or
+            # Slot momentarily unresolvable - during a reconnect or
             # SIM handover the modem drops `ipv4.ip` for a tick or two
             # before the new session is up. The link is still
             # cellular, so carrying the last known slot keeps the
@@ -112,7 +112,7 @@ def _detect_active_kind(caps) -> str:
             # generic "Cellular" sliver between two same-SIM stretches
             # (which read as a spurious third uplink type in the
             # legend). Generic "cellular" is reserved for the case we
-            # have genuinely *never* resolved a slot — e.g. a
+            # have genuinely *never* resolved a slot - e.g. a
             # single-SIM device whose firmware never reports one.
             slot = _last_cellular_slot
         if slot == 1:
