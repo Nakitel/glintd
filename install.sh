@@ -31,6 +31,43 @@ rpcd_running() {
     pgrep rpcd >/dev/null 2>&1
 }
 
+# opkg takes a global lock (/var/lock/opkg.lock) and gives up the
+# instant somebody else holds it - it never waits. Two installs at
+# once is a normal thing here, not an edge case: the companion app
+# auto-reinstalls the daemon after a firmware upgrade, the daily
+# cron self-update fires, and a user taps Install - any two of
+# those can overlap. The loser used to die with "couldn't install
+# dependencies ... fix the router's internet/DNS", which points at
+# exactly the wrong thing. So wait the holder out instead. Only a
+# lock collision is retried; a missing package or an unreachable
+# feed fails identically every time, and re-running it for two
+# minutes helps nobody.
+OPKG_LOCK_TRIES=24   # x 5 s = up to 2 min, longer than a full install
+opkg_retry() {
+    _try=1
+    _out="/tmp/glintd-opkg.$$"
+    while :; do
+        if opkg "$@" >"$_out" 2>&1; then
+            cat "$_out" >>"$LOG"
+            rm -f "$_out"
+            return 0
+        fi
+        cat "$_out" >>"$LOG"
+        if ! grep -q "Could not lock" "$_out"; then
+            rm -f "$_out"
+            return 1
+        fi
+        if [ "$_try" -ge "$OPKG_LOCK_TRIES" ]; then
+            rm -f "$_out"
+            log "opkg still locked after $((OPKG_LOCK_TRIES * 5))s - giving up"
+            return 1
+        fi
+        [ "$_try" = 1 ] && log "opkg is locked by another install - waiting for it to finish"
+        _try=$((_try + 1))
+        sleep 5
+    done
+}
+
 log "glintd installer starting"
 
 # 1. Sanity - we need python3 and sqlite3. opkg ships -light
@@ -79,15 +116,15 @@ if [ -n "$need_pkg" ]; then
     # cached a usable index. Try the update; fall through to
     # the install regardless and only `die` if BOTH fail to
     # produce a working package set.
-    if opkg update >>"$LOG" 2>&1; then
+    if opkg_retry update; then
         log "opkg update succeeded"
     else
         log "opkg update failed - trying install with cached package list"
     fi
     # shellcheck disable=SC2086
-    if ! opkg install $need_pkg >>"$LOG" 2>&1; then
+    if ! opkg_retry install $need_pkg; then
         log "opkg install $need_pkg failed - see $LOG"
-        die "couldn't install dependencies ($need_pkg). Run \`opkg update && opkg install $need_pkg\` manually on the router after fixing its internet/DNS."
+        die "couldn't install dependencies ($need_pkg). If $LOG mentions \`Could not lock\`, another install (the Glint app, or the nightly self-update) is still running - wait a minute and try again. Otherwise run \`opkg update && opkg install $need_pkg\` manually on the router after fixing its internet/DNS."
     fi
 fi
 
@@ -111,7 +148,7 @@ fi
 #     whole install on an otherwise-working router.
 if ! command -v base64 >/dev/null 2>&1; then
     log "installing coreutils-base64 (best-effort, speeds up Glint SMS scan)"
-    opkg install coreutils-base64 >>"$LOG" 2>&1 \
+    opkg_retry install coreutils-base64 \
         || log "coreutils-base64 install failed - companion SMS scan will use the slower openssl fallback (still functional)"
 fi
 
